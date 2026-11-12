@@ -25,6 +25,13 @@ runs:
           libfontconfig1-dev \
           aspell-en
 
+    - shell: bash
+      run: |
+        # Aspell does not ship en_NZ. Accept both British suffix conventions
+        # used by the docs instead of falling back to the US dictionary.
+        printf 'add en_GB-ise.multi\nadd en_GB-ize.multi\n' \
+          | sudo tee "$(aspell dump config dict-dir)/en_NZ.multi" > /dev/null
+
     - uses: conda-incubator/setup-miniconda@3b0f2504dd76ef23b6d31f291f4913fb60ab5ff3 # v2.2.0
       env:
         # Keep Conda outside the checkout so linters do not scan its packages.
