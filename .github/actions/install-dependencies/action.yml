@@ -26,6 +26,9 @@ runs:
           aspell-en
 
     - uses: conda-incubator/setup-miniconda@3b0f2504dd76ef23b6d31f291f4913fb60ab5ff3 # v2.2.0
+      env:
+        # Keep Conda outside the checkout so linters do not scan its packages.
+        CONDA: ${{ runner.temp }}/miniforge
       with:
         channels: conda-forge
         python-version: ${{ matrix.python-version || '' }}
