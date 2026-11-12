@@ -1,98 +1,110 @@
 # THIS FILE IS PART OF THE CYLC WORKFLOW ENGINE.
 # Copyright (C) NIWA & British Crown (Met Office) & Contributors.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: GPL-3.0-or-later
 
-# Deploy a new version of the documentation or rebuild an existing one.
-
-# Note: All changes made to the gh-pages branch are non-destructive
-#       (i.e. no force pushing) so all changes can be undone.
-
+# Build a released documentation tag and publish it without rewriting history.
+# Prerequisites: an existing gh-pages branch containing the site's versions.js,
+# and GitHub Pages configured to publish from that branch's root directory.
 name: deploy
 
 on:
   workflow_dispatch:
     inputs:
       cylc-flow-tag:
-        description: 'Cylc Flow GitHub release tag (must be present in cylc-docs)'
+        description: 'Release tag present in both cylc-flow and cylc-doc (e.g. 8.5.0)'
+        type: string
         required: true
       cylc-rose-tag:
-        description: 'cylc rose github release tag'
+        description: 'Compatible cylc-rose release tag'
+        type: string
         required: true
       cylc-uis-tag:
-        description: 'cylc uiserver github release tag'
+        description: 'Compatible cylc-uiserver release tag'
+        type: string
         required: true
       metomi-rose-tag:
-        description: 'Rose GitHub release tag (currently only affects cylc-rose install)'
+        description: 'Compatible metomi/rose release tag'
+        type: string
         required: true
       set_stable:
-        description: 'Stable build. Make this the default documented version.'
+        description: 'Make this the stable and default documented version'
         type: boolean
         default: true
-        required: false
       set_latest:
-        description: 'Latest build (but not the default version). If the build is both the Latest and the Stable/default, use `set_stable` as well.'
+        description: 'Make this the latest documented version'
         type: boolean
         default: true
-        required: false
       skip_linkcheck:
-        description: 'Skip linkcheck build'
+        description: 'Skip checking external links'
         type: boolean
         default: false
-        required: false
-      skip_conda_environment_check:
-        description: "Skip creation of conda environments"
-        type: boolean
-        default: false
-        required: false
 
+permissions:
+  contents: write
+
+# All release deployments update the same branch, regardless of dispatch ref.
+# Do not cancel a deployment while it is publishing.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: deploy-gh-pages
+  cancel-in-progress: false
+
+env:
+  FORCE_COLOR: 'true'
+  PIP_PROGRESS_BAR: 'off'
+  TAG: ${{ inputs.cylc-flow-tag }}
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
-        # use login shell for conda activation
-        shell: bash -leo pipefail {0}
+        shell: bash -euo pipefail {0}
     steps:
+      - name: validate release tags
+        env:
+          CYLC_ROSE_TAG: ${{ inputs.cylc-rose-tag }}
+          CYLC_UIS_TAG: ${{ inputs.cylc-uis-tag }}
+          METOMI_ROSE_TAG: ${{ inputs.metomi-rose-tag }}
+        run: |
+          for tag in "$TAG" "$CYLC_ROSE_TAG" "$CYLC_UIS_TAG" "$METOMI_ROSE_TAG"; do
+            git check-ref-format "refs/tags/$tag"
+          done
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?((a|b|rc)[0-9]+)?$ ]]; then
+            echo '::error::Use a numeric release tag, such as 8.5.0 or 8.5.0rc1.'
+            exit 1
+          fi
+
+      - name: checkout cylc-doc release
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.cylc-flow-tag }}
+          path: docs
+          persist-credentials: false
+
       - name: configure python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
-      - name: configure git
-        uses: cylc/release-actions/configure-git@v1
+      # These cover the native dependencies of Sphinx, ERAlchemy/pygraphviz,
+      # SVG conversion and the spelling extension loaded by src/conf.py.
+      - name: install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential graphviz libgraphviz-dev pkg-config \
+            librsvg2-bin ghostscript gsfonts \
+            libfreetype6-dev libfontconfig1-dev libenchant-2-2 aspell-en
+          python -m pip install --upgrade pip setuptools wheel
 
-      - name: checkout cylc-doc
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.cylc-flow-tag }}
-          path: docs
-
-      - name: install dependencies
-        uses: cylc/cylc-doc/.github/actions/install-dependencies@master
-
-      - name: install cylc-doc
-        working-directory: docs
-        run: pip install ".[all]"
-
-      - name: install libs
+      # Install the docs and all four selected components in one resolver run.
+      # The separate Conda recipe test is disabled as broken in existing CI;
+      # it is not a dependency of the HTML documentation build.
+      - name: install documentation and component dependencies
         uses: cylc/release-actions/install-cylc-components@v1
         with:
+          local_source: ./docs
           cylc_flow: true
           cylc_flow_opts: 'main_loop-log_data_store,main_loop-log_db,main_loop-log_main_loop,main_loop-log_memory'
           cylc_flow_tag: ${{ inputs.cylc-flow-tag }}
@@ -106,12 +118,18 @@ jobs:
           metomi_rose_opts: ''
           metomi_rose_tag: ${{ inputs.metomi-rose-tag }}
 
-      - name: create conda envs
-        uses: ./docs/.github/actions/create-conda-envs
-        if: ${{ ! inputs.skip_conda_environment_check }}
-        with:
-          python_version: '3.x'
-          working_directory: ./docs
+      - name: verify installed dependencies and version
+        run: |
+          python -m pip check
+          python - <<'PY'
+          import os
+          from packaging.version import Version
+          from cylc.flow import __version__
+
+          if Version(__version__) != Version(os.environ['TAG']):
+              raise SystemExit(f'Cylc Flow version {__version__} does not match the release tag')
+          PY
+          dot -V
 
       - name: checkout gh-pages
         uses: actions/checkout@v7
@@ -119,48 +137,57 @@ jobs:
           ref: gh-pages
           path: gh-pages
 
-      - name: sync static files
-        if: ${{ inputs.set_stable }}
-        env:
-          DOCS: '${{ github.workspace }}/docs'
-          PAGE: '${{ github.workspace }}/gh-pages'
-        run: |
-          rsync -r "$DOCS/doc/" "$PAGE/"
-
-      - name: install gh-pages
+      - name: connect build output to gh-pages
         working-directory: docs
         run: |
-          rm -r doc
-          ln -s ../gh-pages doc
-
-      - name: build docs
-        run: |
-          # NOTE: Doing a clean build allows up to update docs for a
-          #       deployed version at a later date.
-          if ${{ inputs.skip_linkcheck }}; then
-            builds=(clean html)
-          else
-            builds=(clean html linkcheck)
+          if [[ ! -f ../gh-pages/versions.js ]]; then
+            echo '::error::The gh-pages branch must contain the existing versions.js site asset.'
+            exit 1
           fi
-          make -C docs \
-            "${builds[@]}" \
-            SPHINXOPTS='-Wn --keep-going' \
-            FORCE_COLOR=true \
-            STABLE=${{ inputs.set_stable }} \
-            LATEST=${{ inputs.set_latest }}
+          # Replace only the documentation checkout's build directory.
+          rm -rf -- doc
+          ln -s ../gh-pages doc
+          mkdir -p src/user-guide/examples
 
-      - name: debug - pip list
-        if: failure()
-        run: pip list
-
-      - name: tidy old versions
-        working-directory: docs
+      - name: build documentation
+        env:
+          STABLE: ${{ inputs.set_stable }}
+          LATEST: ${{ inputs.set_latest }}
+          SKIP_LINKCHECK: ${{ inputs.skip_linkcheck }}
         run: |
-          git rm -r $("./bin/version" tidy) || true
+          builds=(clean html)
+          if [[ "$SKIP_LINKCHECK" != true ]]; then
+            builds+=(linkcheck)
+          fi
+          make -C docs "${builds[@]}" \
+            SPHINXOPTS='-Wn --keep-going' \
+            BUILDDIR="doc/$TAG" STABLE="$STABLE" LATEST="$LATEST"
+          # Refresh after make updates the stable/latest links.
+          (cd docs && bin/version write > doc/versions.json)
 
-      - name: push changes
+      - name: publish documentation
         working-directory: gh-pages
         run: |
-          git add *
-          git commit -m "add: ${{ inputs.cylc-flow-tag }}"
-          git push origin HEAD
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          if git diff --cached --quiet; then
+            echo 'Documentation is already up to date.'
+            exit 0
+          fi
+          git commit -m "docs: deploy $TAG"
+          # Fetch before pushing to detect another workflow updating gh-pages.
+          # A conflict fails the deployment instead of overwriting its changes.
+          git fetch origin gh-pages
+          git rebase origin/gh-pages
+          git push origin HEAD:gh-pages
+
+      - name: debug dependency or build failure
+        if: failure()
+        run: |
+          python -m pip list
+          for log in /tmp/sphinx-err-*; do
+            if [[ -f "$log" ]]; then
+              cat "$log"
+            fi
+          done
