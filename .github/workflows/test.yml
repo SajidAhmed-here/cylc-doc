@@ -26,7 +26,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SPHINXOPTS: '-Wn --keep-going'
+  # Use the available British dictionary; en_NZ falls back to US spelling.
+  SPHINXOPTS: '-Wn --keep-going -D spelling_lang=en_GB'
   FORCE_COLOR: 'true'
   PIP_PROGRESS_BAR: 'off'
 
